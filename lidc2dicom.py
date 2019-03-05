@@ -68,11 +68,26 @@ class LIDC2DICOMConverter:
 
     maskArray = a.boolean_mask(10000).astype(np.int16)
 
-    maskArray = np.swapaxes(maskArray,0,2).copy()
-    maskArray = np.rollaxis(maskArray,2,1).copy()
+    # when using plastimatch for converting the CT series
+    # this is dependent on the conversion tool, since the conversion tool
+    # defines the reference reconstructed volume geometry
+    # Also,
+    #  "ITK indices, by convention, are [i,j,k] while NumPy indices are [k,j,i] 3 by convention."
+    # https://discourse.itk.org/t/importing-image-from-array-and-axis-reorder/1192/2
+    #maskArray = np.swapaxes(maskArray,0,2).copy()
+    #maskArray = np.rollaxis(maskArray,2,1).copy()
+
+    imageSpacing = volume.GetSpacing()
+    newSpacing = []
+    for ii in maskArray.shape:
+      if ii == 512:
+        newSpacing.append(imageSpacing[0])
+      else:
+        newSpacing.append(imageSpacing[2])
+    newSpacing.reverse()
 
     maskVolume = itk.GetImageFromArray(maskArray)
-    maskVolume.SetSpacing(volume.GetSpacing())
+    maskVolume.SetSpacing(newSpacing)
     maskVolume.SetOrigin(volume.GetOrigin())
     writerType = itk.ImageFileWriter[itk.Image[itk.SS, 3]]
     writer = writerType.New()
@@ -80,6 +95,9 @@ class LIDC2DICOMConverter:
     writer.SetFileName(nrrdSegFile)
     writer.SetInput(maskVolume)
     writer.Update()
+
+    self.logger.error("Image has to be re-oriented to use dcm2niix! Not done - use plastimatch!")
+    sys.exit()
 
     dcmSegFile = os.path.join(self.tempSubjectDir,segName+'.dcm')
 
@@ -95,11 +113,15 @@ class LIDC2DICOMConverter:
     ctSeriesUID = None
     try:
       segDcm = pydicom.read_file(dcmSegFile)
-      segUID = segDcm.SOPInstanceUID
-      ctSeriesUID = segDcm.ReferencedSeriesSequence[0].SeriesInstanceUID
     except:
       self.logger.error("Failed to read Segmentation file")
       return
+
+    try:
+      segUID = segDcm.SOPInstanceUID
+      ctSeriesUID = segDcm.ReferencedSeriesSequence[0].SeriesInstanceUID
+    except:
+      self.logger.error("Failed to get references from Segmentation")
 
     with open(self.srTemplate,'r') as f:
       srJSON = json.load(f)
@@ -217,31 +239,26 @@ class LIDC2DICOMConverter:
         self.logger.warning("Geometry inconsistent for subject %s" % (s))
 
       self.tempSubjectDir = os.path.join(self.tempDir,s)
-      reconTempDir = os.path.join(self.tempSubjectDir,"dicom2nrrd")
-      try:
-        os.makedirs(reconTempDir)
-      except:
-        pass
 
-      scanNRRDFile = os.path.join(self.tempSubjectDir,s+'_CT.nrrd')
-      if not os.path.exists(scanNRRDFile):
+      scanNIfTIFile = os.path.join(self.tempSubjectDir,s+'_CT.nii')
+      if not os.path.exists(scanNIfTIFile):
         # convert
         # tempDir = tempfile.mkdtemp()
-        plastimatchCmd = ['/Users/fedorov/build/plastimatch/plastimatch', 'convert','--input',seriesDir,'--output-img',scanNRRDFile]
-        self.logger.info("Running plastimatch with "+str(plastimatchCmd))
+        dcm2niixCmd = ['dcm2niix', '-f', s+'_CT','-o', self.tempSubjectDir, seriesDir]
+        self.logger.info("Running dcm2niix with "+str(dcm2niixCmd))
 
-        sp = subprocess.Popen(plastimatchCmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
+        sp = subprocess.Popen(dcm2niixCmd, stderr=subprocess.PIPE, stdout=subprocess.PIPE)
         (stdout, stderr) = sp.communicate()
-        self.logger.info("plastimatch stdout: "+stdout.decode('ascii'))
-        self.logger.warning("plastimatch stderr: "+stderr.decode('ascii'))
+        self.logger.info("dcm2niix stdout: "+stdout.decode('ascii'))
+        self.logger.warning("dcm2niix stderr: "+stderr.decode('ascii'))
 
-        self.logger.info('plastimatch completed')
-        self.logger.info("Conversion of CT volume OK - result in "+scanNRRDFile)
+        self.logger.info('dcm2niix completed')
+        self.logger.info("Conversion of CT volume OK - result in "+scanNIfTIFile)
       else:
-        self.logger.info(scanNRRDFile+" exists. Not rerunning volume reconstruction.")
+        self.logger.info(scanNIfTIFile+" exists. Not rerunning volume reconstruction.")
 
       reader = itk.ImageFileReader[itk.Image[itk.SS, 3]].New()
-      reader.SetFileName(scanNRRDFile)
+      reader.SetFileName(scanNIfTIFile)
       reader.Update()
       volume = reader.GetOutput()
 
